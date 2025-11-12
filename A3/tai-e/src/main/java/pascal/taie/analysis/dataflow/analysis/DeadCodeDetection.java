@@ -33,21 +33,13 @@ import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.cfg.Edge;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.ArrayAccess;
-import pascal.taie.ir.exp.CastExp;
-import pascal.taie.ir.exp.FieldAccess;
-import pascal.taie.ir.exp.NewExp;
-import pascal.taie.ir.exp.RValue;
-import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.exp.*;
 import pascal.taie.ir.stmt.AssignStmt;
 import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -55,6 +47,63 @@ public class DeadCodeDetection extends MethodAnalysis {
 
     public DeadCodeDetection(AnalysisConfig config) {
         super(config);
+    }
+
+    private Set<Stmt> getReachableNodeFromIf(If node, DataflowResult<Stmt, CPFact> constants, Set<Edge<Stmt>> nextEdges) {
+        Set<Stmt> reachable = new HashSet<>();
+        CPFact inFact = constants.getInFact(node);
+        ConditionExp condExp = node.getCondition();
+        Value value = ConstantPropagation.evaluate(condExp, constants.getInFact(node));
+
+        if (value.isConstant()) {
+            boolean conditionHolds = value.getConstant() != 0;
+            for (Edge<Stmt> edge: nextEdges) {
+                if (edge.getKind() == Edge.Kind.IF_TRUE && conditionHolds) {
+                    reachable.add(edge.getTarget());
+                } else if (edge.getKind() == Edge.Kind.IF_FALSE && !conditionHolds) {
+                    reachable.add(edge.getTarget());
+                }
+            }
+        } else {
+            for (Edge<Stmt> edge: nextEdges) {
+                reachable.add(edge.getTarget());
+            }
+        }
+        return reachable;
+    }
+
+    private Set<Stmt> getReachableNodeFromSwitch(SwitchStmt node, DataflowResult<Stmt, CPFact> constants, Set<Edge<Stmt>> nextEdges) {
+        Set<Stmt> reachable = new HashSet<>();
+        CPFact inFact = constants.getInFact(node);
+        Var switchVar = node.getVar();
+        Value switchConst = inFact.get(switchVar);
+
+        if (switchConst.isConstant()) {
+            int switchInt = switchConst.getConstant();
+            boolean caseMatched = false;
+            for (Edge<Stmt> cfgEdge: nextEdges) {
+                if (cfgEdge.isSwitchCase()) {
+                    Stmt target = cfgEdge.getTarget();
+                    int caseValue = cfgEdge.getCaseValue();
+                    if (caseValue == switchInt) {
+                        reachable.add(target);
+                        caseMatched = true;
+                    }
+                }
+            }
+            if (!caseMatched) {
+                for (Edge<Stmt> cfgEdge: nextEdges) {
+                    if (cfgEdge.getKind() == Edge.Kind.SWITCH_DEFAULT) {
+                        reachable.add(cfgEdge.getTarget());
+                    }
+                }
+            }
+        } else {
+            for (Edge<Stmt> cfgEdge: nextEdges) {
+                reachable.add(cfgEdge.getTarget());
+            }
+        }
+        return reachable;
     }
 
     @Override
@@ -69,7 +118,48 @@ public class DeadCodeDetection extends MethodAnalysis {
                 ir.getResult(LiveVariableAnalysis.ID);
         // keep statements (dead code) sorted in the resulting set
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
-        // TODO - finish me
+        // Unreachable code detection
+        Set<Stmt> visited = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
+        visited.add(cfg.getEntry());
+        visited.add(cfg.getExit());
+        List<Stmt> queue = new LinkedList<>();
+
+        // bfs traversal
+        queue.add(cfg.getEntry());
+        while (!queue.isEmpty()) {
+            Stmt stmt = queue.remove(0);
+            Set<Stmt> nextStmts = cfg.getSuccsOf(stmt);
+            if (stmt instanceof SwitchStmt) {
+                nextStmts = getReachableNodeFromSwitch((SwitchStmt) stmt, constants, cfg.getOutEdgesOf(stmt));
+            } else if (stmt instanceof If) {
+                nextStmts = getReachableNodeFromIf((If) stmt, constants, cfg.getOutEdgesOf(stmt));
+            }
+            for (Stmt nextStmt : nextStmts) {
+                if (!visited.contains(nextStmt)) {
+                    visited.add(nextStmt);
+                    queue.add(nextStmt);
+                }
+            }
+        }
+
+        for (Stmt stmt : cfg.getNodes()) {
+            if (!visited.contains(stmt)) {
+                deadCode.add(stmt);
+            }
+        }
+
+        // Dead assignment detection
+        for (Stmt stmt : cfg.getNodes()) {
+            if (stmt instanceof AssignStmt<?,?> assignStmt) {
+                LValue defOpt = assignStmt.getLValue();
+                RValue useExp = assignStmt.getRValue();
+                SetFact<Var> outFact = liveVars.getOutFact(stmt);
+                if (defOpt instanceof Var && !outFact.contains((Var) defOpt) && hasNoSideEffect(useExp)) {
+                    deadCode.add(stmt);
+                }
+            }
+        }
+
         // Your task is to recognize dead code in ir and add it to deadCode
         return deadCode;
     }
