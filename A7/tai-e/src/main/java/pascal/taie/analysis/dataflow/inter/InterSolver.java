@@ -22,12 +22,17 @@
 
 package pascal.taie.analysis.dataflow.inter;
 
+import pascal.taie.analysis.dataflow.analysis.constprop.CPFact;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
+import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.icfg.ICFG;
+import pascal.taie.analysis.graph.icfg.ICFGEdge;
+import pascal.taie.ir.stmt.StoreArray;
+import pascal.taie.ir.stmt.StoreField;
+import pascal.taie.language.classes.JField;
 import pascal.taie.util.collection.SetQueue;
 
-import java.util.Queue;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
@@ -59,10 +64,46 @@ class InterSolver<Method, Node, Fact> {
     }
 
     private void initialize() {
-        // TODO - finish me
+        for (Node node : icfg) {
+            Fact initialFact = analysis.newInitialFact();
+            result.setInFact(node, initialFact);
+            result.setOutFact(node, initialFact);
+        }
+
+        icfg.entryMethods().forEach(entryMethod -> {
+            Node entryNode = icfg.getEntryOf(entryMethod);
+            Fact boundaryFact = analysis.newBoundaryFact(entryNode);
+            result.setInFact(entryNode, boundaryFact);
+            result.setOutFact(entryNode, boundaryFact);
+        });
     }
 
+    public void addToWorkList(Node node) {
+        workList.add(node);
+    }
+
+    public void addAllToWorkList(Collection<Node> nodes) {
+        workList.addAll(nodes);
+    }
+
+
     private void doSolve() {
-        // TODO - finish me
+       workList = new ArrayDeque<>(icfg.getNodes());
+
+       while (!workList.isEmpty()) {
+           Node node = workList.poll();
+           Fact inFact = analysis.newInitialFact();
+
+           for (ICFGEdge<Node> edge : icfg.getInEdgesOf(node)) {
+               Fact transFact = analysis.transferEdge(edge, result.getOutFact(edge.getSource()));
+               analysis.meetInto(transFact, inFact);
+           }
+
+           if (analysis.transferNode(node, inFact, result.getOutFact(node))) {
+               for (ICFGEdge<Node> edge : icfg.getOutEdgesOf(node)) {
+                   workList.add(edge.getTarget());
+               }
+           }
+       }
     }
 }
